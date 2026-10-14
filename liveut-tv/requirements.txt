@@ -1,0 +1,7 @@
+PySide6==6.8.3
+faster-whisper==1.1.1
+numpy==2.0.2
+tensorflow==2.18.0
+tensorflow-hub==0.16.1
+pyinstaller==6.12.0
+keyring==25.6.0
