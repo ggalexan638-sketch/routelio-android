@@ -1,0 +1,65 @@
+name: LiveUT TV Windows Setup
+
+on:
+  push:
+    branches: [liveut-windows-build]
+    paths:
+      - "liveut-tv/**"
+      - ".github/workflows/liveut-windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Quellcode laden
+        uses: actions/checkout@v4
+
+      - name: Python 3.12 installieren
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: liveut-tv/requirements.txt
+
+      - name: FFmpeg und Inno Setup installieren
+        shell: powershell
+        run: |
+          choco install ffmpeg-shared innosetup -y --no-progress
+
+      - name: Python-Pakete installieren
+        shell: powershell
+        working-directory: liveut-tv
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Windows-App bauen
+        shell: powershell
+        working-directory: liveut-tv
+        run: |
+          pyinstaller --noconfirm --clean --windowed --name "LiveUT TV 1.1 OpenAI" --collect-all faster_whisper --collect-all ctranslate2 --collect-all av --collect-all tensorflow --collect-all tensorflow_hub --collect-all keyring app.py
+          $ffmpeg = (Get-Command ffmpeg.exe).Source
+          Copy-Item $ffmpeg ".\dist\LiveUT TV 1.1 OpenAI\ffmpeg.exe" -Force
+
+      - name: Setup.exe bauen
+        shell: powershell
+        working-directory: liveut-tv
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "$env:ProgramFiles\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup wurde nicht gefunden." }
+          & $iscc ".\installer.iss"
+          if (-not (Test-Path ".\Ausgabe\LiveUT-TV-Setup.exe")) { throw "Setup.exe wurde nicht erstellt." }
+
+      - name: Installationsdatei bereitstellen
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveUT-TV-Setup
+          path: liveut-tv/Ausgabe/LiveUT-TV-Setup.exe
+          if-no-files-found: error
+          retention-days: 30
