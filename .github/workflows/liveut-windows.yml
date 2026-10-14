@@ -29,7 +29,8 @@ jobs:
       - name: FFmpeg und Inno Setup installieren
         shell: powershell
         run: |
-          choco install ffmpeg-shared innosetup -y --no-progress
+          choco install ffmpeg innosetup -y --no-progress
+          refreshenv
 
       - name: Python-Pakete installieren
         shell: powershell
