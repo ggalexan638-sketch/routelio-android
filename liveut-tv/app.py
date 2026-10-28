@@ -3,7 +3,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode
 
 from PySide6.QtCore import Qt, Signal, QObject, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPixmap, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLineEdit, QFileDialog, QListWidget, QLabel, QComboBox, QSpinBox,
@@ -17,8 +17,8 @@ if (VLC_DIR / "libvlc.dll").exists():
     os.environ.setdefault("VLC_PLUGIN_PATH", str(VLC_DIR / "plugins"))
     os.add_dll_directory(str(VLC_DIR)) if hasattr(os, "add_dll_directory") else None
 
-APP_VERSION = "1.3"
-USER_AGENT = "LiveUT-TV/1.3 VLC/3.0"
+APP_VERSION = "2.0"
+USER_AGENT = "Panther-LIVEUT/2.0 VLC/3.0"
 PLAYLIST_EXTENSIONS = {".m3u", ".m3u8", ".xspf", ".txt", ".json"}
 LANGUAGES = [
     ("Automatisch (60+ Sprachen)", "auto"), ("Deutsch", "de"),
@@ -361,7 +361,8 @@ class VLCWidget(QWidget):
     def __init__(self):
         super().__init__()
         import vlc
-        options = ["--network-caching=1800", "--live-caching=1800", "--http-reconnect",
+        self.buffer_ms = 2500
+        options = ["--network-caching=2500", "--live-caching=2500", "--http-reconnect",
                    "--avcodec-hw=any", "--no-video-title-show", "--quiet"]
         self.vlc = vlc
         self.instance = vlc.Instance(options)
@@ -378,13 +379,15 @@ class VLCWidget(QWidget):
     def play(self, url):
         self.url = url
         media = self.instance.media_new(url, ":http-user-agent=" + USER_AGENT,
-                                        ":network-caching=1800", ":live-caching=1800")
+                                        f":network-caching={self.buffer_ms}", f":live-caching={self.buffer_ms}")
         self.player.set_media(media)
         self.player.play()
 
     def retry(self):
         if self.url:
             self.player.stop(); time.sleep(0.15); self.play(self.url)
+
+    def set_buffer(self, milliseconds): self.buffer_ms = int(milliseconds)
 
     def state_name(self):
         try: return str(self.player.get_state())
@@ -408,20 +411,28 @@ class FloatingCaption(QWidget):
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("LiveUT TV 1.3 – Multi Live-UT")
+        self.setWindowTitle("Panther LIVEUT 2.0")
         self.resize(1500, 880)
+        logo_path = BASE / "assets" / "panther-liveut-logo.png"
+        if logo_path.exists(): self.setWindowIcon(QIcon(str(logo_path)))
         self.items, self.current, self.live_worker = [], None, None
         self.caption_color, self.caption_size = "#ffffff", 38
         self.bus = Bus(); self.bus.caption.connect(self.show_caption)
         self.bus.status.connect(self.set_status); self.bus.loaded.connect(self.finish_load)
 
         root = QWidget(); self.setCentralWidget(root); outer = QVBoxLayout(root)
+        header = QHBoxLayout(); self.brand_logo = QLabel()
+        if logo_path.exists(): self.brand_logo.setPixmap(QPixmap(str(logo_path)).scaled(76, 76, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        header.addWidget(self.brand_logo); brand = QLabel("PANTHER LIVEUT 2.0"); brand.setObjectName("BrandTitle"); header.addWidget(brand); header.addStretch(1)
+        tagline = QLabel("Stabiles IPTV • Vier Live-UT-Systeme • Barrierefrei"); tagline.setObjectName("Tagline"); header.addWidget(tagline); outer.addLayout(header)
         top = QHBoxLayout(); self.url = QLineEdit(); self.url.setPlaceholderText("M3U/M3U8, Xtream-get.php oder direkte Stream-Adresse")
         top.addWidget(self.url, 1)
         open_address = QPushButton("Adresse öffnen"); open_address.clicked.connect(self.open_url); top.addWidget(open_address)
         open_file = QPushButton("IPTV-Datei"); open_file.clicked.connect(self.open_file); top.addWidget(open_file)
         video_file = QPushButton("Video-Datei"); video_file.clicked.connect(self.open_video_file); top.addWidget(video_file)
         waipu = QPushButton("Waipu.tv öffnen"); waipu.clicked.connect(self.open_waipu); top.addWidget(waipu)
+        netflix = QPushButton("Netflix"); netflix.clicked.connect(lambda: self.open_streaming_site("https://www.netflix.com/browse", "Netflix")); top.addWidget(netflix)
+        prime = QPushButton("Prime Video"); prime.clicked.connect(lambda: self.open_streaming_site("https://www.primevideo.com", "Prime Video")); top.addWidget(prime)
         outer.addLayout(top)
 
         split = QSplitter(); left = QWidget(); left_layout = QVBoxLayout(left)
@@ -440,6 +451,8 @@ class Window(QMainWindow):
         self.size = QSpinBox(); self.size.setRange(20, 72); self.size.setValue(38); self.size.valueChanged.connect(self.change_size); controls.addWidget(QLabel("Textgröße")); controls.addWidget(self.size)
         color = QPushButton("Textfarbe"); color.clicked.connect(self.choose_color); controls.addWidget(color)
         full = QPushButton("Vollbild"); full.clicked.connect(self.toggle_fullscreen); controls.addWidget(full)
+        self.buffer_box = QComboBox(); self.buffer_box.addItem("Puffer kurz", 1000); self.buffer_box.addItem("Puffer normal", 2500); self.buffer_box.addItem("Puffer lang", 6000); self.buffer_box.setCurrentIndex(1); self.buffer_box.currentIndexChanged.connect(lambda: self.video.set_buffer(self.buffer_box.currentData())); controls.addWidget(self.buffer_box)
+        self.reconnect_forever = QCheckBox("Immer neu verbinden"); self.reconnect_forever.setChecked(True); controls.addWidget(self.reconnect_forever)
         self.float_button = QPushButton("UT über Waipu"); self.float_button.setCheckable(True); self.float_button.toggled.connect(self.toggle_floating); controls.addWidget(self.float_button)
         center_layout.addLayout(controls)
         self.status = QLabel("Bereit"); self.status.setWordWrap(True); center_layout.addWidget(self.status)
@@ -500,9 +513,12 @@ class Window(QMainWindow):
             self.play_url(item)
 
     def open_waipu(self):
-        webbrowser.open("https://play.waipu.tv")
+        self.open_streaming_site("https://play.waipu.tv", "Waipu.tv")
+
+    def open_streaming_site(self, url, name):
+        webbrowser.open(url)
         self.float_button.setChecked(True)
-        self.status.setText("Waipu.tv wurde im Browser geöffnet. Starte Live-UT und lasse den Browserton eingeschaltet.")
+        self.status.setText(name + " wurde im Browser geöffnet. Starte Live-UT und lasse den Browserton eingeschaltet.")
 
     def open_url(self):
         url = self.url.text().strip()
@@ -548,8 +564,11 @@ class Window(QMainWindow):
     def check_stream(self):
         if not self.current: return
         state = self.video.state_name()
-        if ("Error" in state or "Ended" in state) and self.retry_count < 3:
-            self.retry_count += 1; self.status.setText(f"Stream wird neu verbunden ({self.retry_count}/3) …"); self.video.retry()
+        allowed = self.reconnect_forever.isChecked() or self.retry_count < 3
+        if ("Error" in state or "Ended" in state) and allowed:
+            self.retry_count += 1
+            limit = "∞" if self.reconnect_forever.isChecked() else "3"
+            self.status.setText(f"Stream wird neu verbunden ({self.retry_count}/{limit}) …"); self.video.retry()
 
     def load_key(self):
         try:
@@ -620,5 +639,5 @@ class Window(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setStyleSheet("QWidget{background:#0b1628;color:#f4f7fb;font-size:15px} QPushButton,QLineEdit,QComboBox,QSpinBox{padding:9px;background:#162945;border:1px solid #315274;border-radius:6px} QPushButton:hover{background:#18a999} QListWidget{background:#0d1d33}")
+    app.setStyleSheet("QWidget{background:#071321;color:#f5fbff;font-size:15px} #BrandTitle{color:#39e7f2;font-size:30px;font-weight:800;letter-spacing:2px} #Tagline{color:#a993ff;font-size:16px} QPushButton,QLineEdit,QComboBox,QSpinBox{padding:10px;background:#102945;border:1px solid #28cbd7;border-radius:8px} QPushButton:hover{background:#153f62;border:2px solid #8b5cff} QPushButton:pressed{background:#0dd3c7;color:#06131e} QListWidget{background:#091c31;border:1px solid #245073} QListWidget::item:selected{background:#0aa7b4;color:white} QGroupBox{border:1px solid #6446c8;border-radius:9px;margin-top:8px;padding-top:10px} QCheckBox{spacing:8px}")
     window = Window(); window.show(); sys.exit(app.exec())
