@@ -26,10 +26,10 @@ jobs:
           cache: pip
           cache-dependency-path: liveut-tv/requirements.txt
 
-      - name: FFmpeg und Inno Setup installieren
+      - name: FFmpeg, VLC und Inno Setup installieren
         shell: powershell
         run: |
-          choco install ffmpeg innosetup -y --no-progress
+          choco install ffmpeg innosetup vlc -y --no-progress
           refreshenv
 
       - name: Python-Pakete installieren
@@ -43,9 +43,12 @@ jobs:
         shell: powershell
         working-directory: liveut-tv
         run: |
-          pyinstaller --noconfirm --clean --windowed --name "LiveUT TV 1.1 OpenAI" --collect-all faster_whisper --collect-all ctranslate2 --collect-all av --collect-all tensorflow --collect-all tensorflow_hub --collect-all keyring app.py
+          pyinstaller --noconfirm --clean --windowed --name "LiveUT TV 1.2 Soniox" --collect-all keyring --collect-all soundcard --hidden-import vlc --hidden-import websockets.sync.client app.py
           $ffmpeg = (Get-Command ffmpeg.exe).Source
-          Copy-Item $ffmpeg ".\dist\LiveUT TV 1.1 OpenAI\ffmpeg.exe" -Force
+          Copy-Item $ffmpeg ".\dist\LiveUT TV 1.2 Soniox\ffmpeg.exe" -Force
+          $vlc = "${env:ProgramFiles}\VideoLAN\VLC"
+          if (-not (Test-Path $vlc)) { throw "VLC wurde nicht gefunden." }
+          Copy-Item "$vlc\*" ".\dist\LiveUT TV 1.2 Soniox\" -Recurse -Force
 
       - name: Setup.exe bauen
         shell: powershell
