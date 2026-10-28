@@ -1,8 +1,8 @@
-name: LiveUT TV Windows Setup
+name: Panther LIVEUT 2.0 Windows Setup
 
 on:
   push:
-    branches: [liveut-windows-build]
+    branches: [panther-liveut-2.0]
     paths:
       - "liveut-tv/**"
       - ".github/workflows/liveut-windows.yml"
@@ -43,12 +43,12 @@ jobs:
         shell: powershell
         working-directory: liveut-tv
         run: |
-          pyinstaller --noconfirm --clean --windowed --name "LiveUT TV 1.3 Multi UT" --collect-all keyring --collect-all soundcard --collect-all faster_whisper --collect-all ctranslate2 --collect-all av --hidden-import vlc --hidden-import websockets.sync.client app.py
+          pyinstaller --noconfirm --clean --windowed --name "Panther LIVEUT 2.0" --add-data "assets;assets" --collect-all keyring --collect-all soundcard --collect-all faster_whisper --collect-all ctranslate2 --collect-all av --hidden-import vlc --hidden-import websockets.sync.client app.py
           $ffmpeg = (Get-Command ffmpeg.exe).Source
-          Copy-Item $ffmpeg ".\dist\LiveUT TV 1.3 Multi UT\ffmpeg.exe" -Force
+          Copy-Item $ffmpeg ".\dist\Panther LIVEUT 2.0\ffmpeg.exe" -Force
           $vlc = "${env:ProgramFiles}\VideoLAN\VLC"
           if (-not (Test-Path $vlc)) { throw "VLC wurde nicht gefunden." }
-          Copy-Item "$vlc\*" ".\dist\LiveUT TV 1.3 Multi UT\" -Recurse -Force
+          Copy-Item "$vlc\*" ".\dist\Panther LIVEUT 2.0\" -Recurse -Force
 
       - name: Setup.exe bauen
         shell: powershell
@@ -58,12 +58,12 @@ jobs:
           if (-not (Test-Path $iscc)) { $iscc = "$env:ProgramFiles\Inno Setup 6\ISCC.exe" }
           if (-not (Test-Path $iscc)) { throw "Inno Setup wurde nicht gefunden." }
           & $iscc ".\installer.iss"
-          if (-not (Test-Path ".\Ausgabe\LiveUT-TV-Setup.exe")) { throw "Setup.exe wurde nicht erstellt." }
+          if (-not (Test-Path ".\Ausgabe\Panther-LIVEUT-2.0-Setup.exe")) { throw "Setup.exe wurde nicht erstellt." }
 
       - name: Installationsdatei bereitstellen
         uses: actions/upload-artifact@v4
         with:
-          name: LiveUT-TV-Setup
-          path: liveut-tv/Ausgabe/LiveUT-TV-Setup.exe
+          name: Panther-LIVEUT-2.0-Setup
+          path: liveut-tv/Ausgabe/Panther-LIVEUT-2.0-Setup.exe
           if-no-files-found: error
           retention-days: 30
