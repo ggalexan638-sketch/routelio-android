@@ -1,4 +1,4 @@
-import sys, os, re, json, gzip, subprocess, threading, time, urllib.request, urllib.error
+import sys, os, re, json, gzip, subprocess, threading, time, urllib.request, urllib.error, tempfile, uuid, wave, webbrowser
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode
 
@@ -17,8 +17,8 @@ if (VLC_DIR / "libvlc.dll").exists():
     os.environ.setdefault("VLC_PLUGIN_PATH", str(VLC_DIR / "plugins"))
     os.add_dll_directory(str(VLC_DIR)) if hasattr(os, "add_dll_directory") else None
 
-APP_VERSION = "1.2"
-USER_AGENT = "LiveUT-TV/1.2 VLC/3.0"
+APP_VERSION = "1.3"
+USER_AGENT = "LiveUT-TV/1.3 VLC/3.0"
 PLAYLIST_EXTENSIONS = {".m3u", ".m3u8", ".xspf", ".txt", ".json"}
 LANGUAGES = [
     ("Automatisch (60+ Sprachen)", "auto"), ("Deutsch", "de"),
@@ -142,6 +142,42 @@ def load_xtream(url):
     return result
 
 
+def capture_system_audio(seconds=3.0, rate=16000):
+    import soundcard as sc
+    import numpy as np
+    speaker = sc.default_speaker()
+    loopback = sc.get_microphone(id=str(speaker.name), include_loopback=True)
+    with loopback.recorder(samplerate=rate, channels=1, blocksize=1600) as recorder:
+        audio = recorder.record(numframes=int(rate * seconds))
+    return (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+
+
+def pcm_to_wav(pcm, rate=16000):
+    handle = tempfile.NamedTemporaryFile(suffix=".wav", delete=False); handle.close()
+    with wave.open(handle.name, "wb") as wav:
+        wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(rate); wav.writeframes(pcm)
+    return handle.name
+
+
+def openai_multipart(path):
+    boundary = "----LiveUT" + uuid.uuid4().hex
+    audio = Path(path).read_bytes()
+    body = (f'--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\ngpt-4o-mini-transcribe\r\n'
+            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="liveut.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode() + audio + f'\r\n--{boundary}--\r\n'.encode()
+    return body, "multipart/form-data; boundary=" + boundary
+
+
+def openai_transcribe(path, key):
+    body, content_type = openai_multipart(path)
+    request = urllib.request.Request("https://api.openai.com/v1/audio/transcriptions", data=body,
+                                     headers={"Authorization": "Bearer " + key, "Content-Type": content_type})
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            return json.loads(response.read().decode("utf-8")).get("text", "").strip()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"OpenAI {exc.code}: {exc.read().decode('utf-8','ignore')[:250]}")
+
+
 class Bus(QObject):
     caption = Signal(str)
     status = Signal(str)
@@ -227,6 +263,98 @@ class SonioxWorker(threading.Thread):
             self.stop_event.set()
 
 
+class OpenAIWorker(threading.Thread):
+    def __init__(self, key, bus):
+        super().__init__(daemon=True); self.key, self.bus = key, bus; self.stop_event = threading.Event()
+
+    def stop(self): self.stop_event.set()
+
+    def run(self):
+        self.bus.status.emit("OpenAI Live-UT startet …")
+        while not self.stop_event.is_set():
+            path = None
+            try:
+                path = pcm_to_wav(capture_system_audio(3.0))
+                text = openai_transcribe(path, self.key)
+                if text: self.bus.caption.emit(text)
+                self.bus.status.emit("OpenAI Live-UT aktiv")
+            except Exception as exc:
+                if not self.stop_event.is_set(): self.bus.status.emit("OpenAI-Fehler: " + str(exc))
+                break
+            finally:
+                if path:
+                    try: os.unlink(path)
+                    except OSError: pass
+
+
+class WhisperWorker(threading.Thread):
+    def __init__(self, model, bus, language="auto"):
+        super().__init__(daemon=True); self.model, self.bus, self.language = model, bus, language; self.stop_event = threading.Event()
+
+    def stop(self): self.stop_event.set()
+
+    def run(self):
+        try:
+            from faster_whisper import WhisperModel
+            self.bus.status.emit("Lokales Whisper-Modell wird geladen …")
+            engine = WhisperModel(self.model, device="cpu", compute_type="int8")
+            while not self.stop_event.is_set():
+                path = pcm_to_wav(capture_system_audio(2.8))
+                try:
+                    segments, _ = engine.transcribe(path, language=None if self.language == "auto" else self.language,
+                                                    beam_size=1, vad_filter=True)
+                    text = " ".join(segment.text.strip() for segment in segments).strip()
+                    if text: self.bus.caption.emit(text)
+                    self.bus.status.emit("Lokales Whisper aktiv")
+                finally:
+                    try: os.unlink(path)
+                    except OSError: pass
+        except Exception as exc:
+            if not self.stop_event.is_set(): self.bus.status.emit("Whisper-Fehler: " + str(exc))
+
+
+class AssemblyAIWorker(threading.Thread):
+    def __init__(self, key, bus, language="auto"):
+        super().__init__(daemon=True); self.key, self.bus, self.language = key, bus, language; self.stop_event = threading.Event()
+
+    def stop(self): self.stop_event.set()
+
+    def run(self):
+        try:
+            from websockets.sync.client import connect
+            query = "sample_rate=16000&speech_model=universal-streaming-multilingual"
+            if self.language != "auto": query += "&language_codes=" + self.language
+            self.bus.status.emit("AssemblyAI verbindet …")
+            with connect("wss://streaming.assemblyai.com/v3/ws?" + query,
+                         additional_headers={"Authorization": self.key}, open_timeout=15, close_timeout=5) as ws:
+                sender = threading.Thread(target=self._send_audio, args=(ws,), daemon=True); sender.start()
+                self.bus.status.emit("AssemblyAI Live-UT aktiv")
+                while not self.stop_event.is_set():
+                    try: message = json.loads(ws.recv(timeout=3))
+                    except TimeoutError: continue
+                    if message.get("type") in ("Error", "error"):
+                        raise RuntimeError(message.get("error") or message.get("message") or "API-Fehler")
+                    text = message.get("transcript", "").strip()
+                    if text: self.bus.caption.emit(text)
+        except Exception as exc:
+            if not self.stop_event.is_set(): self.bus.status.emit("AssemblyAI-Fehler: " + str(exc))
+        finally:
+            self.stop_event.set()
+
+    def _send_audio(self, ws):
+        try:
+            import soundcard as sc
+            import numpy as np
+            speaker = sc.default_speaker(); loopback = sc.get_microphone(id=str(speaker.name), include_loopback=True)
+            with loopback.recorder(samplerate=16000, channels=1, blocksize=800) as recorder:
+                while not self.stop_event.is_set():
+                    audio = recorder.record(numframes=800)
+                    ws.send((np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes())
+        except Exception as exc:
+            if not self.stop_event.is_set(): self.bus.status.emit("Systemton-Fehler: " + str(exc))
+            self.stop_event.set()
+
+
 class VLCWidget(QWidget):
     error = Signal(str)
 
@@ -263,12 +391,26 @@ class VLCWidget(QWidget):
         except Exception: return ""
 
 
+class FloatingCaption(QWidget):
+    def __init__(self):
+        super().__init__(None, Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(1000, 150)
+        self.label = QLabel(""); self.label.setAlignment(Qt.AlignCenter); self.label.setWordWrap(True)
+        layout = QVBoxLayout(self); layout.setContentsMargins(8, 8, 8, 8); layout.addWidget(self.label)
+
+    def apply_style(self, color, size):
+        self.label.setStyleSheet(f"color:{color};background:rgba(0,0,0,220);font-size:{size}px;font-weight:600;padding:10px;border-radius:6px")
+
+    def set_caption(self, text): self.label.setText(text)
+
+
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"LiveUT TV {APP_VERSION} – Soniox")
+        self.setWindowTitle("LiveUT TV 1.3 – Multi Live-UT")
         self.resize(1500, 880)
-        self.items, self.current, self.soniox_worker = [], None, None
+        self.items, self.current, self.live_worker = [], None, None
         self.caption_color, self.caption_size = "#ffffff", 38
         self.bus = Bus(); self.bus.caption.connect(self.show_caption)
         self.bus.status.connect(self.set_status); self.bus.loaded.connect(self.finish_load)
@@ -278,6 +420,8 @@ class Window(QMainWindow):
         top.addWidget(self.url, 1)
         open_address = QPushButton("Adresse öffnen"); open_address.clicked.connect(self.open_url); top.addWidget(open_address)
         open_file = QPushButton("IPTV-Datei"); open_file.clicked.connect(self.open_file); top.addWidget(open_file)
+        video_file = QPushButton("Video-Datei"); video_file.clicked.connect(self.open_video_file); top.addWidget(video_file)
+        waipu = QPushButton("Waipu.tv öffnen"); waipu.clicked.connect(self.open_waipu); top.addWidget(waipu)
         outer.addLayout(top)
 
         split = QSplitter(); left = QWidget(); left_layout = QVBoxLayout(left)
@@ -292,15 +436,22 @@ class Window(QMainWindow):
         self.overlay.setWordWrap(True); self.overlay.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.video.resizeEvent = self.resize_overlay; self.apply_caption_style()
         controls = QHBoxLayout()
-        self.soniox_button = QPushButton("Soniox Live-UT EIN"); self.soniox_button.clicked.connect(self.toggle_soniox); controls.addWidget(self.soniox_button)
+        self.soniox_button = QPushButton("Live-UT EIN"); self.soniox_button.clicked.connect(self.toggle_soniox); controls.addWidget(self.soniox_button)
         self.size = QSpinBox(); self.size.setRange(20, 72); self.size.setValue(38); self.size.valueChanged.connect(self.change_size); controls.addWidget(QLabel("Textgröße")); controls.addWidget(self.size)
         color = QPushButton("Textfarbe"); color.clicked.connect(self.choose_color); controls.addWidget(color)
         full = QPushButton("Vollbild"); full.clicked.connect(self.toggle_fullscreen); controls.addWidget(full)
+        self.float_button = QPushButton("UT über Waipu"); self.float_button.setCheckable(True); self.float_button.toggled.connect(self.toggle_floating); controls.addWidget(self.float_button)
         center_layout.addLayout(controls)
         self.status = QLabel("Bereit"); self.status.setWordWrap(True); center_layout.addWidget(self.status)
         split.addWidget(center)
 
-        soniox = QGroupBox("Soniox Live-Untertitel"); settings = QVBoxLayout(soniox)
+        soniox = QGroupBox("Vier Live-UT-Systeme"); settings = QVBoxLayout(soniox)
+        settings.addWidget(QLabel("Live-UT auswählen:")); self.provider = QComboBox()
+        self.provider.addItem("Soniox – schnell und günstig", "soniox")
+        self.provider.addItem("OpenAI – gute Erkennung", "openai")
+        self.provider.addItem("AssemblyAI – Live Streaming", "assemblyai")
+        self.provider.addItem("Whisper lokal – kostenlos", "whisper")
+        self.provider.currentIndexChanged.connect(self.provider_changed); settings.addWidget(self.provider)
         settings.addWidget(QLabel("API-Key (nur im Windows-Anmeldespeicher):"))
         self.soniox_key = QLineEdit(); self.soniox_key.setEchoMode(QLineEdit.Password); self.soniox_key.setPlaceholderText("Soniox API-Key")
         settings.addWidget(self.soniox_key)
@@ -313,10 +464,12 @@ class Window(QMainWindow):
         self.target_language.addItem("Originalsprache", "none")
         for name, code in LANGUAGES[1:]: self.target_language.addItem(name, code)
         self.target_language.setCurrentIndex(1); settings.addWidget(self.target_language)
-        note = QLabel("Soniox unterstützt 60+ Sprachen. API-Nutzung wird nach Zeit berechnet.")
+        settings.addWidget(QLabel("Whisper-Modell:")); self.whisper_model = QComboBox(); self.whisper_model.addItems(["tiny", "base", "small"]); self.whisper_model.setCurrentText("base"); settings.addWidget(self.whisper_model)
+        note = QLabel("Soniox unterstützt 60+ Sprachen. Cloud-APIs kosten nach Nutzung; lokales Whisper ist kostenlos.")
         note.setWordWrap(True); settings.addWidget(note); settings.addStretch(1)
         split.addWidget(soniox); split.setSizes([330, 900, 280]); outer.addWidget(split)
 
+        self.floating = FloatingCaption(); self.floating.apply_style(self.caption_color, self.caption_size)
         self.load_key()
         self.retry_count = 0
         self.watchdog = QTimer(self); self.watchdog.timeout.connect(self.check_stream); self.watchdog.start(4000)
@@ -328,17 +481,28 @@ class Window(QMainWindow):
         self.overlay.setStyleSheet(f"color:{self.caption_color};background:rgba(0,0,0,210);font-size:{self.caption_size}px;font-weight:600;padding:8px;border-radius:5px")
 
     def change_size(self, value):
-        self.caption_size = value; self.apply_caption_style()
+        self.caption_size = value; self.apply_caption_style(); self.floating.apply_style(self.caption_color, self.caption_size)
 
     def choose_color(self):
         color = QColorDialog.getColor(QColor(self.caption_color), self)
-        if color.isValid(): self.caption_color = color.name(); self.apply_caption_style()
+        if color.isValid(): self.caption_color = color.name(); self.apply_caption_style(); self.floating.apply_style(self.caption_color, self.caption_size)
 
     def open_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "IPTV-Datei öffnen", "", "IPTV-Listen (*.m3u *.m3u8 *.xspf *.json *.txt);;Alle Dateien (*)")
         if not path: return
         try: self.finish_load(decode_playlist(Path(path).read_bytes(), path))
         except Exception as exc: QMessageBox.warning(self, "IPTV-Datei", str(exc))
+
+    def open_video_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Video öffnen", "", "Videos (*.mp4 *.mkv *.avi *.mov *.mpeg *.mpg *.ts *.m2ts *.webm *.wmv *.flv);;Alle Dateien (*)")
+        if path:
+            item = {"name": Path(path).name, "group": "Eigene Videos", "logo": "", "type": "video", "url": Path(path).resolve().as_uri()}
+            self.play_url(item)
+
+    def open_waipu(self):
+        webbrowser.open("https://play.waipu.tv")
+        self.float_button.setChecked(True)
+        self.status.setText("Waipu.tv wurde im Browser geöffnet. Starte Live-UT und lasse den Browserton eingeschaltet.")
 
     def open_url(self):
         url = self.url.text().strip()
@@ -390,36 +554,59 @@ class Window(QMainWindow):
     def load_key(self):
         try:
             import keyring
-            key = keyring.get_password("LiveUT TV", "Soniox API Key")
+            provider = self.provider.currentData() if hasattr(self, "provider") else "soniox"
+            key = keyring.get_password("LiveUT TV", provider + " API Key")
             if key: self.soniox_key.setText(key)
+            else: self.soniox_key.clear()
         except Exception: pass
 
     def save_key(self):
         if self.remember.isChecked():
             import keyring
-            keyring.set_password("LiveUT TV", "Soniox API Key", self.soniox_key.text().strip())
+            keyring.set_password("LiveUT TV", self.provider.currentData() + " API Key", self.soniox_key.text().strip())
+
+    def provider_changed(self):
+        self.stop_soniox(); self.load_key()
+        local = self.provider.currentData() == "whisper"
+        self.soniox_key.setEnabled(not local); self.remember.setEnabled(not local); self.show_key.setEnabled(not local)
+        self.soniox_key.setPlaceholderText("Kein Key nötig" if local else self.provider.currentText().split("–")[0].strip() + " API-Key")
 
     def toggle_soniox(self):
-        if self.soniox_worker:
+        if self.live_worker:
             self.stop_soniox(); return
-        if not self.current: return QMessageBox.information(self, "Soniox", "Bitte zuerst einen Sender starten.")
+        if not self.current and not self.float_button.isChecked(): return QMessageBox.information(self, "Live-UT", "Bitte zuerst IPTV, Video oder Waipu starten.")
+        provider = self.provider.currentData()
         key = self.soniox_key.text().strip()
-        if not key: return QMessageBox.information(self, "Soniox", "Bitte deinen Soniox API-Key eingeben.")
-        try: self.save_key()
-        except Exception as exc: self.status.setText("Key konnte nicht gespeichert werden: " + str(exc))
-        self.soniox_worker = SonioxWorker(self.current["url"], key, self.bus,
-                                          self.source_language.currentData(), self.target_language.currentData())
-        self.soniox_worker.start(); self.soniox_button.setText("Soniox Live-UT AUS")
+        if provider != "whisper" and not key: return QMessageBox.information(self, "Live-UT", "Bitte den API-Key für den gewählten Dienst eingeben.")
+        if provider != "whisper":
+            try: self.save_key()
+            except Exception as exc: self.status.setText("Key konnte nicht gespeichert werden: " + str(exc))
+        language = self.source_language.currentData()
+        if provider == "soniox":
+            self.live_worker = SonioxWorker(self.current["url"] if self.current else "system", key, self.bus, language, self.target_language.currentData())
+        elif provider == "openai": self.live_worker = OpenAIWorker(key, self.bus)
+        elif provider == "assemblyai": self.live_worker = AssemblyAIWorker(key, self.bus, language)
+        else: self.live_worker = WhisperWorker(self.whisper_model.currentText(), self.bus, language)
+        self.live_worker.start(); self.soniox_button.setText("Live-UT AUS")
 
     def stop_soniox(self):
-        if self.soniox_worker: self.soniox_worker.stop(); self.soniox_worker = None
-        self.soniox_button.setText("Soniox Live-UT EIN")
+        if self.live_worker: self.live_worker.stop(); self.live_worker = None
+        self.soniox_button.setText("Live-UT EIN")
+
+    def toggle_floating(self, enabled):
+        if enabled:
+            screen = QApplication.primaryScreen().availableGeometry()
+            self.floating.resize(min(1100, screen.width() - 80), 150)
+            self.floating.move(screen.x() + (screen.width() - self.floating.width()) // 2, screen.y() + screen.height() - 190)
+            self.floating.show(); self.floating.raise_()
+        else: self.floating.hide()
 
     def show_caption(self, text):
         words = text.split()
         if len(words) > 22: words = words[-22:]
         midpoint = min(len(words), max(1, len(words) // 2))
-        self.overlay.setText(" ".join(words[:midpoint]) + ("\n" + " ".join(words[midpoint:]) if midpoint < len(words) else ""))
+        caption = " ".join(words[:midpoint]) + ("\n" + " ".join(words[midpoint:]) if midpoint < len(words) else "")
+        self.overlay.setText(caption); self.floating.set_caption(caption)
 
     def set_status(self, text): self.status.setText(text)
     def toggle_fullscreen(self): self.showNormal() if self.isFullScreen() else self.showFullScreen()
