@@ -1,13 +1,13 @@
-LIVEUT TV – native Windows-Version
+PANTHER LIVEUT 2.0 – native Windows-Version
 =================================
 1. ZIP vollständig entpacken.
 2. EXE_ERSTELLEN.cmd rechts anklicken und "Als Administrator ausführen".
 3. Der erste Bau kann 20–60 Minuten dauern und mehrere GB herunterladen.
-4. Danach liegt die fertige Datei in: Ausgabe\LiveUT-TV-Setup.exe
+4. Danach liegt die fertige Datei in: Ausgabe\Panther-LIVEUT-2.0-Setup.exe
 5. Setup.exe doppelklicken und normal installieren.
 
 Nur eigene beziehungsweise legal nutzbare IPTV-Zugänge verwenden.
-LiveUT TV 1.3 Multi Live-UT
+Panther LIVEUT 2.0
 =====================
 
 NEU:
@@ -24,10 +24,13 @@ NEU:
 - schwebendes Untertitelfenster bleibt über Waipu und anderen Programmen sichtbar
 - normale Videodateien: MP4, MKV, AVI, MOV, MPEG, TS, M2TS, WebM, WMV und FLV
 - vier Live-UT-Systeme: Soniox, OpenAI, AssemblyAI und lokales Whisper
+- eigenes Panther-Logo und kontrastreiche Oberfläche in Dunkelblau, Türkis und Violett
+- Netflix, Prime Video und Waipu.tv im offiziellen Browser mit schwebenden Untertiteln
+- wählbarer IPTV-Puffer und automatische unbegrenzte Wiederverbindung
 
 Benutzung:
 1. EXE_ERSTELLEN.cmd doppelklicken und bis zum Ende warten.
-2. dist > LiveUT TV 1.3 Multi UT > LiveUT TV 1.3 Multi UT.exe starten.
+2. dist > Panther LIVEUT 2.0 > Panther LIVEUT 2.0.exe starten.
 3. M3U-Datei oder M3U-Adresse laden und einen Sender starten.
 4. Eigenen Soniox API-Key rechts eingeben.
 5. Sprache oder automatische Erkennung und Ausgabesprache wählen.
